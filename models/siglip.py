@@ -14,10 +14,10 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn.init import _calculate_fan_in_and_fan_out
 
 from transformers.activations import ACT2FN
-from transfromers.modeling_attn_mask_utils import _prepare_4d_attention_mask
+from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling, ImageClassifierOutput
 from transformers.modeling_utils import PreTrainedModel
-from .quantization_utils import QuantLinear, QuantAct, QuantConv2d, IntGELU, IntLayerNorm
+from quantization_utils import QuantLinear, QuantAct, QuantConv2d, IntGELU, IntLayerNorm, QuantMatMul, IntSoftmax
 from transformers.utils import (
     ModelOutput,
     add_start_docstrings,
@@ -28,11 +28,11 @@ from transformers.utils import (
     replace_return_docstrings,
     torch_int,
 )
-from .configuration_siglip import SiglipConfig, SiglipTextConfig, SiglipVisionConfig
+from transformers.models.siglip.configuration_siglip import SiglipConfig, SiglipTextConfig, SiglipVisionConfig
 
 
 if is_flash_attn_2_available():
-    from ...modeling_flash_attention_utils import _flash_attention_forward
+    from transformers.modeling_flash_attention_utils import _flash_attention_forward
 
 
 logger = logging.get_logger(__name__)
@@ -548,8 +548,7 @@ class SiglipSdpaAttention(nn.Module):
         hidden_states: torch.Tensor,
         act_scaling_factor,
         attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = False,
-        ,  
+        output_attentions: Optional[bool] = False, 
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Input shape: Batch x Time x Channel"""
 
@@ -637,8 +636,6 @@ class SiglipEncoderLayer(nn.Module):
         self.norm1 = IntLayerNorm(config.hidden_size, eps=config.layer_norm_eps) 
         self.norm2 = IntLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
-        self.dropout = nn.Dropout(config.dropout)
-
         self.qact1 = QuantAct()
         self.qact2 = QuantAct(16)  
 
@@ -658,7 +655,6 @@ class SiglipEncoderLayer(nn.Module):
         hidden_states, act_scaling_factor = self.attention(hidden_states, attention_mask, act_scaling_factor)
         hidden_states, act_scaling_factor = self.qact1(hidden_states, act_scaling_factor)
         hidden_states = residual + hidden_states
-        hidden_states = self.dropout(hidden_states)
         residual = hidden_states
 
         hidden_states, act_scaling_factor = self.norm2(hidden_states, act_scaling_factor)
@@ -666,8 +662,6 @@ class SiglipEncoderLayer(nn.Module):
         hidden_states, act_scaling_factor = self.mlp(hidden_states, act_scaling_factor)
         hidden_states, act_scaling_factor = self.qact2(hidden_states, act_scaling_factor)
         hidden_states = residual + hidden_states
-        hidden_states = self.dropout(hidden_states)
-
         return hidden_states, act_scaling_factor
 
 
@@ -855,16 +849,18 @@ class SiglipEncoder(nn.Module):
         super().__init__()
         self.config = config
         # Assuming SiglipEncoderLayer has been quantized to support quantized outputs
-        self.layers = nn.ModuleList([QuantizedSiglipEncoderLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([SiglipEncoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
 
     def forward(
         self,
         inputs_embeds,
+        act_scaling_factor,
         attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        
     ) -> Union[Tuple, BaseModelOutput]:
         r"""
         Args:
@@ -901,7 +897,6 @@ class SiglipEncoder(nn.Module):
             layer_outputs = encoder_layer(
                 hidden_states,
                 attention_mask,
-                output_attentions=output_attentions,
                 act_scaling_factor=act_scaling_factor
             )
 
@@ -921,7 +916,6 @@ class SiglipEncoder(nn.Module):
         return BaseModelOutput(
             last_hidden_state=[hidden_states,act_scaling_factor], hidden_states=encoder_states, attentions=all_attentions
         )
-
 
 
 class SiglipTextTransformer(nn.Module):
@@ -1093,9 +1087,9 @@ class SiglipVisionTransformer(nn.Module):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         hidden_states= self.embeddings(
-            pixel_values, interpolate_pos_encoding=interpolate_pos_encoding, act_scaling_factor=act_scaling_factor
+            pixel_values, interpolate_pos_encoding=interpolate_pos_encoding
         )
-        hidden_state,act_scaling_factor = QuantAct()
+        hidden_state,act_scaling_factor = self.qact_input(hidden_states)
         # Step 2: Pass through the quantized encoder
         encoder_outputs = self.encoder(
             inputs_embeds=hidden_states,
