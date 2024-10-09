@@ -554,38 +554,37 @@ class SiglipSdpaAttention(nn.Module):
 
         batch_size, q_len, _ = hidden_states.size()
 
-        query_states, act_scaling_factor = self.q_proj(hidden_states, act_scaling_factor)
-        key_states, act_scaling_factor = self.k_proj(hidden_states, act_scaling_factor)
-        value_states, act_scaling_factor = self.v_proj(hidden_states, act_scaling_factor)
+        query_states, act_scaling_factor_q = self.q_proj(hidden_states, act_scaling_factor)
+        key_states, act_scaling_factor_k = self.k_proj(hidden_states, act_scaling_factor)
+        value_states, act_scaling_factor_v = self.v_proj(hidden_states, act_scaling_factor)
 
-        query_states, act_scaling_factor = self.qact1(query_states, act_scaling_factor)
-        key_states, act_scaling_factor = self.qact1(key_states, act_scaling_factor)
-        value_states, act_scaling_factor = self.qact1(value_states, act_scaling_factor)
+        query_states, act_scaling_factor_q = self.qact1(query_states, act_scaling_factor_q)
+        key_states, act_scaling_factor_k = self.qact1(key_states, act_scaling_factor_k)
+        value_states, act_scaling_factor_v = self.qact1(value_states, act_scaling_factor_v)
 
         query_states = query_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-        attn_weights, act_scaling_factor = self.matmul_qk(query_states, act_scaling_factor, key_states.transpose(2, 3), act_scaling_factor)
+        attn_weights, act_scaling_factor_attn = self.matmul_qk(query_states, act_scaling_factor_q, key_states.transpose(2, 3), act_scaling_factor_k)
         attn_weights = attn_weights * self.scale
 
         if attention_mask is not None:
             attn_weights += attention_mask
 
-        attn_weights, act_scaling_factor = self.int_softmax(attn_weights, act_scaling_factor)
+        attn_weights, act_scaling_factor_attn = self.int_softmax(attn_weights, act_scaling_factor_attn)
 
         attn_weights = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
 
-        attn_output, act_scaling_factor = self.matmul_attn(attn_weights, act_scaling_factor, value_states, act_scaling_factor)
+        attn_output, act_scaling_factor_out = self.matmul_attn(attn_weights, act_scaling_factor_attn, value_states, act_scaling_factor_v)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(batch_size, q_len, self.embed_dim)
 
-        attn_output, act_scaling_factor = self.out_proj(attn_output, act_scaling_factor)
-        attn_output, act_scaling_factor = self.qact3(attn_output, act_scaling_factor)
+        attn_output, act_scaling_factor_out = self.out_proj(attn_output, act_scaling_factor_out)
+        attn_output, act_scaling_factor = self.qact3(attn_output, act_scaling_factor_out)
 
-        return attn_output, attn_weights
-
+        return attn_output, act_scaling_factor,attn_weights
 SIGLIP_ATTENTION_CLASSES = {
     "eager": SiglipAttention,
     "flash_attention_2": SiglipFlashAttention2,
@@ -616,6 +615,7 @@ class SiglipMLP(nn.Module):
         self.qact_gelu = QuantAct()
 
     def forward(self, x, act_scaling_factor):
+
         x, act_scaling_factor = self.fc1(x, act_scaling_factor)
         x, act_scaling_factor = self.qact_gelu(x, act_scaling_factor)
         x, act_scaling_factor = self.act(x, act_scaling_factor)
@@ -637,7 +637,9 @@ class SiglipEncoderLayer(nn.Module):
         self.norm2 = IntLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
         self.qact1 = QuantAct()
-        self.qact2 = QuantAct(16)  
+        self.qact2 = QuantAct()
+        self.qact3 = QuantAct()
+        self.qact4 = QuantAct(16)  
 
     def forward(self, hidden_states: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, act_scaling_factor: Optional[float] = None):
         """
@@ -652,15 +654,15 @@ class SiglipEncoderLayer(nn.Module):
         residual = hidden_states
 
         hidden_states, act_scaling_factor = self.norm1(hidden_states, act_scaling_factor)
-        hidden_states, act_scaling_factor = self.attention(hidden_states, attention_mask, act_scaling_factor)
         hidden_states, act_scaling_factor = self.qact1(hidden_states, act_scaling_factor)
+        hidden_states, act_scaling_factor,attention_weights = self.attention(hidden_states, act_scaling_factor,attention_mask)
+        hidden_states, act_scaling_factor = self.qact2(hidden_states, act_scaling_factor)
         hidden_states = residual + hidden_states
         residual = hidden_states
-
         hidden_states, act_scaling_factor = self.norm2(hidden_states, act_scaling_factor)
-
+        hidden_states, act_scaling_factor = self.qact3(hidden_states, act_scaling_factor)
         hidden_states, act_scaling_factor = self.mlp(hidden_states, act_scaling_factor)
-        hidden_states, act_scaling_factor = self.qact2(hidden_states, act_scaling_factor)
+        hidden_states, act_scaling_factor = self.qact4(hidden_states, act_scaling_factor)
         hidden_states = residual + hidden_states
         return hidden_states, act_scaling_factor
 
@@ -1061,10 +1063,12 @@ class SiglipVisionTransformer(nn.Module):
         self.encoder = SiglipEncoder(config)
         
         self.post_layernorm = IntLayerNorm(embed_dim, eps=config.layer_norm_eps)
-        
+        self.qact_postlayernorm = QuantAct()
         self.use_head = True if not hasattr(config, "vision_use_head") else config.vision_use_head
-        if self.use_head:
-            self.head = SiglipMultiheadAttentionPoolingHead(config)
+        self.qact_head = QuantAct(16)
+        #We dont use Pooled Outputs in DragonFly
+        # if self.use_head:
+        #     self.head = SiglipMultiheadAttentionPoolingHead(config)
 
     @add_start_docstrings_to_model_forward(SIGLIP_VISION_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=BaseModelOutputWithPooling, config_class=SiglipVisionConfig)
@@ -1099,22 +1103,27 @@ class SiglipVisionTransformer(nn.Module):
             act_scaling_factor=act_scaling_factor,  
         )
 
-        last_hidden_state, act_scaling_factor = encoder_outputs[0], encoder_outputs[1]
+        last_hidden_state, act_scaling_factor = encoder_outputs.last_hidden_state
 
         last_hidden_state, act_scaling_factor = self.post_layernorm(last_hidden_state, act_scaling_factor)
-
+        last_hidden_state,act_scaling_factor = self.post_layernorm(last_hidden_state,act_scaling_factor)
         # Step 4: Apply pooling head if needed
-        pooler_output = self.head(last_hidden_state, act_scaling_factor) if self.use_head else None
 
+        #In DragonFly we dont use pooled outputs
+
+        #pooler_output, = self.head(last_hidden_state, act_scaling_factor) if self.use_head else None
         # Return outputs as either a tuple or BaseModelOutputWithPooling
-        if not return_dict:
-            return (last_hidden_state, pooler_output) + encoder_outputs[2:]
-
+        
+        #Return Dict is false by default in siglip
+        # if not return_dict:
+        #     return (last_hidden_state, pooler_output) + encoder_outputs[2:]
+        
+        
         return BaseModelOutputWithPooling(
             last_hidden_state=[last_hidden_state,act_scaling_factor],
-            pooler_output=pooler_output,
-            hidden_states=encoder_outputs.hidden_states,
-            attentions=encoder_outputs.attentions,
+            pooler_output=None,
+            hidden_states=None,
+            attentions=None,
         )
 
 class SiglipMultiheadAttentionPoolingHead(nn.Module):

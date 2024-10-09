@@ -75,37 +75,37 @@ class SiglipSdpaAttention(nn.Module):
 
         batch_size, q_len, _ = hidden_states.size()
 
-        query_states, act_scaling_factor = self.q_proj(hidden_states, act_scaling_factor)
-        key_states, act_scaling_factor = self.k_proj(hidden_states, act_scaling_factor)
-        value_states, act_scaling_factor = self.v_proj(hidden_states, act_scaling_factor)
+        query_states, act_scaling_factor_q = self.q_proj(hidden_states, act_scaling_factor)
+        key_states, act_scaling_factor_k = self.k_proj(hidden_states, act_scaling_factor)
+        value_states, act_scaling_factor_v = self.v_proj(hidden_states, act_scaling_factor)
 
-        query_states, act_scaling_factor = self.qact1(query_states, act_scaling_factor)
-        key_states, act_scaling_factor = self.qact1(key_states, act_scaling_factor)
-        value_states, act_scaling_factor = self.qact1(value_states, act_scaling_factor)
+        query_states, act_scaling_factor_q = self.qact1(query_states, act_scaling_factor_q)
+        key_states, act_scaling_factor_k = self.qact1(key_states, act_scaling_factor_k)
+        value_states, act_scaling_factor_v = self.qact1(value_states, act_scaling_factor_v)
 
         query_states = query_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-        attn_weights, act_scaling_factor = self.matmul_qk(query_states, act_scaling_factor, key_states.transpose(2, 3), act_scaling_factor)
+        attn_weights, act_scaling_factor_attn = self.matmul_qk(query_states, act_scaling_factor_q, key_states.transpose(2, 3), act_scaling_factor_k)
         attn_weights = attn_weights * self.scale
 
         if attention_mask is not None:
             attn_weights += attention_mask
 
-        attn_weights, act_scaling_factor = self.int_softmax(attn_weights, act_scaling_factor)
+        attn_weights, act_scaling_factor_attn = self.int_softmax(attn_weights, act_scaling_factor_attn)
 
         attn_weights = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
 
-        attn_output, act_scaling_factor = self.matmul_attn(attn_weights, act_scaling_factor, value_states, act_scaling_factor)
+        attn_output, act_scaling_factor_out = self.matmul_attn(attn_weights, act_scaling_factor_attn, value_states, act_scaling_factor_v)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(batch_size, q_len, self.embed_dim)
 
-        attn_output, act_scaling_factor = self.out_proj(attn_output, act_scaling_factor)
-        attn_output, act_scaling_factor = self.qact3(attn_output, act_scaling_factor)
+        attn_output, act_scaling_factor_out = self.out_proj(attn_output, act_scaling_factor_out)
+        attn_output, act_scaling_factor = self.qact3(attn_output, act_scaling_factor_out)
 
-        return attn_output, attn_weights
+        return attn_output, act_scaling_factor_out,attn_weights
 
 class SiglipEncoderLayer(nn.Module):
     def __init__(self, config):

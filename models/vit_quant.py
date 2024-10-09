@@ -11,9 +11,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from .layers_quant import PatchEmbed, Mlp, DropPath, trunc_normal_
-from .quantization_utils import QuantLinear, QuantAct, QuantConv2d, IntLayerNorm, IntSoftmax, IntGELU, QuantMatMul
-from .utils import load_weights_from_npz
+from layers_quant import PatchEmbed, Mlp, DropPath, trunc_normal_
+from quantization_utils import QuantLinear, QuantAct, QuantConv2d, IntLayerNorm, IntSoftmax, IntGELU, QuantMatMul
+from utils import load_weights_from_npz
 
 
 __all__ = ['deit_tiny_patch16_224', 'deit_small_patch16_224', 'deit_base_patch16_224',

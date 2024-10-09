@@ -75,13 +75,13 @@ class QuantLinear(nn.Linear):
                 self.max_val = cur_max
             else:
                 raise Exception('For weight, we only support per_channel quantization.')
-
             self.fc_scaling_factor = symmetric_linear_quantization_params(
                 self.weight_bit, self.min_val, self.max_val)
 
         self.weight_integer = self.weight_function(
             self.weight, self.weight_bit, self.fc_scaling_factor, True)
 
+    
         bias_scaling_factor = self.fc_scaling_factor * prev_act_scaling_factor
 
         if self.bias is not None:
